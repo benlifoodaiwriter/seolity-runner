@@ -1,0 +1,54 @@
+# SEOlity – Subscription AI runner
+# Created and updated automatically by the SEOlity WordPress plugin. Do not rename this file.
+# Runs SEOlity AI requests with Claude Code (Claude Pro/Max) or OpenAI Codex (ChatGPT Plus/Pro).
+name: SEOlity AI
+
+on:
+  workflow_dispatch:
+    inputs:
+      engines:
+        description: "claude, codex or claude,codex"
+        default: "claude"
+      branch:
+        description: "Queue branch"
+        default: "seolity-jobs"
+      idle:
+        description: "Seconds to wait for follow-up requests before exiting"
+        default: "120"
+
+concurrency:
+  group: seolity-ai
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install official CLI
+        run: |
+          case ",${{ inputs.engines }}," in *",claude,"*) npm install -g @anthropic-ai/claude-code && claude --version ;; esac
+          case ",${{ inputs.engines }}," in *",codex,"*) npm install -g @openai/codex && codex --version ;; esac
+
+      - name: Run SEOlity AI requests with your subscription
+        run: node seolity-runner/runner.mjs
+        env:
+          SEOLITY_ENGINES: ${{ inputs.engines }}
+          SEOLITY_JOBS_BRANCH: ${{ inputs.branch }}
+          SEOLITY_IDLE_SEC: ${{ inputs.idle }}
+          SEOLITY_SHARED_SECRET: ${{ secrets.SEOLITY_SHARED_SECRET }}
+          SEOLITY_CALLBACK_URL: ${{ secrets.SEOLITY_CALLBACK_URL }}
+          SEOLITY_RELAY_URL: ${{ secrets.SEOLITY_RELAY_URL }}
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          CODEX_AUTH_JSON: ${{ secrets.CODEX_AUTH_JSON }}
