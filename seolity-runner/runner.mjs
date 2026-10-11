@@ -6,6 +6,9 @@
  * vendors' OFFICIAL command-line tools in headless mode:
  *   - engine "claude": Claude Code  (`claude -p`)  + CLAUDE_CODE_OAUTH_TOKEN (Claude Pro/Max, from `claude setup-token`)
  *   - engine "codex" : OpenAI Codex (`codex exec`) + ChatGPT auth.json      (ChatGPT Plus/Pro)
+ *   - engine "http"  : an API request (Anthropic, OpenAI, Gemini, …) sent from GitHub's network, for
+ *                      hosts that cannot reach AI APIs themselves (e.g. servers in Iran). The request,
+ *                      including the API key, travels AES-256-GCM encrypted and is never written in clear.
  *
  * Queue (branch SEOLITY_JOBS_BRANCH, default "seolity-jobs"):
  *   jobs/<id>.json     written by WordPress  – AES-256-GCM encrypted request
@@ -29,9 +32,10 @@ const SECRET = E.SEOLITY_SHARED_SECRET || '';
 const CALLBACK = /^https?:\/\//.test((E.SEOLITY_CALLBACK_URL || '').trim()) ? E.SEOLITY_CALLBACK_URL.trim() : '';
 const RELAY = /^https:\/\//.test((E.SEOLITY_RELAY_URL || '').trim()) ? E.SEOLITY_RELAY_URL.trim().replace(/\/+$/, '') : '';
 const BRANCH = /^[A-Za-z0-9._\/-]{1,100}$/.test(E.SEOLITY_JOBS_BRANCH || '') ? E.SEOLITY_JOBS_BRANCH : 'seolity-jobs';
-const ENGINES = (E.SEOLITY_ENGINES || 'claude').split(',').map((s) => s.trim()).filter((s) => s === 'claude' || s === 'codex');
+const ENGINES = [...new Set((E.SEOLITY_ENGINES || 'claude').split(',').map((s) => s.trim()).filter((s) => s === 'claude' || s === 'codex' || s === 'http').concat('http'))];
 const BUDGET_MS = Math.min(Math.max(Number(E.SEOLITY_BUDGET_MIN || 40), 5), 55) * 60000;
-const IDLE_MS = Math.min(Math.max(Number(E.SEOLITY_IDLE_SEC || 120), 0), 600) * 1000;
+const IDLE_MS = Math.min(Math.max(Number(E.SEOLITY_IDLE_SEC || 120), 0), 1800) * 1000;
+const POLL_MS = Math.min(Math.max(Number(E.SEOLITY_POLL_SEC || 2), 1), 30) * 1000;
 const ENGINE_TIMEOUT = Math.min(Math.max(Number(E.SEOLITY_ENGINE_TIMEOUT || 900), 60), 1800) * 1000;
 const RESULT_TTL_MS = 24 * 3600 * 1000;
 const CLAUDE_BIN = E.CLAUDE_BIN || 'claude';
@@ -200,7 +204,28 @@ async function askCodex(job) {
   return { text, usage, model: job.model || 'codex-default' };
 }
 
+async function askHttp(job) {
+  const r = job.http || {};
+  if (!/^https:\/\//.test(r.url || '')) throw new Error('http job without an https URL');
+  const method = (r.method || 'POST').toUpperCase();
+  const res = await fetch(r.url, {
+    method,
+    headers: r.headers || {},
+    body: method === 'GET' || method === 'HEAD' ? undefined : r.body || '',
+    signal: AbortSignal.timeout(Math.min(Math.max(Number(r.timeout) || 180, 10), 600) * 1000),
+  });
+  // The site parses the provider answer itself: hand back status + raw body unchanged.
+  return { text: JSON.stringify({ status: res.status, raw: await res.text() }), usage: { input: 0, output: 0 }, model: 'http' };
+}
+
 /* ------------------------------ queue ------------------------------ */
+/** Cheap change check: one ls-remote instead of a fetch (lets an idle runner react within ~2 s). */
+let lastHead = '';
+async function remoteHead() {
+  const out = await git(['ls-remote', 'origin', `refs/heads/${BRANCH}`]).catch(() => '');
+  return out.split(/\s+/)[0] || '';
+}
+
 async function sync() {
   await git(['fetch', '--quiet', 'origin', BRANCH]);
   await git(['reset', '--quiet', '--hard', `origin/${BRANCH}`]);
@@ -233,6 +258,7 @@ async function pendingJobs() {
     try {
       const job = decrypt(JSON.parse(await readFile(file, 'utf8')));
       if (!ENGINES.includes(job.engine)) continue; // Another run (with that CLI installed) handles it.
+      if (existsSync(join(WORK, 'results', n))) { await unlink(file).catch(() => {}); continue; } // Already answered.
       out.push({ file, job });
     } catch (e) {
       log(`cannot read ${n}: ${e.message} (wrong SEOLITY_SHARED_SECRET?)`);
@@ -258,7 +284,7 @@ async function processOne({ file, job }) {
   const t0 = Date.now();
   let result;
   try {
-    const r = job.engine === 'codex' ? await askCodex(job) : await askClaude(job);
+    const r = job.engine === 'http' ? await askHttp(job) : job.engine === 'codex' ? await askCodex(job) : await askClaude(job);
     result = { id: job.id, ok: true, text: r.text, usage: r.usage, model: r.model, ms: Date.now() - t0 };
     summary.push(`- ✅ ${job.task || 'task'} (${job.engine}, ${Math.round(result.ms / 1000)}s)`);
   } catch (e) {
@@ -288,14 +314,21 @@ async function main() {
   const started = Date.now();
   let idleSince = 0;
   let done = 0;
-  log(`engines=${ENGINES.join(',')} branch=${BRANCH}`);
+  log(`engines=${ENGINES.join(',')} branch=${BRANCH} idle=${IDLE_MS / 1000}s poll=${POLL_MS / 1000}s`);
   while (Date.now() - started < BUDGET_MS) {
     await sync();
+    lastHead = (await git(['rev-parse', 'HEAD']).catch(() => '')).trim();
     const jobs = await pendingJobs();
     if (!jobs.length) {
       if (!idleSince) idleSince = Date.now();
-      if (Date.now() - idleSince >= IDLE_MS) break;
-      await new Promise((r) => setTimeout(r, 10000)); // Wait briefly for follow-up requests (e.g. a second AI step).
+      // Stay warm: poll the queue branch head every POLL_MS until IDLE_MS passes without work.
+      let changed = false;
+      while (Date.now() - idleSince < IDLE_MS && Date.now() - started < BUDGET_MS) {
+        await new Promise((r) => setTimeout(r, POLL_MS));
+        const head = await remoteHead();
+        if (head && head !== lastHead) { changed = true; break; }
+      }
+      if (!changed) break;
       continue;
     }
     idleSince = 0;

@@ -1,20 +1,25 @@
 # SEOlity – Subscription AI runner
 # Created and updated automatically by the SEOlity WordPress plugin. Do not rename this file.
-# Runs SEOlity AI requests with Claude Code (Claude Pro/Max) or OpenAI Codex (ChatGPT Plus/Pro).
+# Runs SEOlity AI requests with Claude Code (Claude Pro/Max) or OpenAI Codex (ChatGPT Plus/Pro),
+# and relays API requests for hosts that cannot reach AI APIs directly (engine "http").
 name: SEOlity AI
+run-name: SEOlity AI (${{ inputs.engines }})
 
 on:
   workflow_dispatch:
     inputs:
       engines:
-        description: "claude, codex or claude,codex"
+        description: "claude, codex, http (comma separated)"
         default: "claude"
       branch:
         description: "Queue branch"
         default: "seolity-jobs"
       idle:
-        description: "Seconds to wait for follow-up requests before exiting"
+        description: "Seconds to stay warm (waiting for follow-up requests) before exiting"
         default: "120"
+      poll:
+        description: "Seconds between queue checks while warm"
+        default: "2"
 
 concurrency:
   group: seolity-ai
@@ -36,10 +41,16 @@ jobs:
         with:
           node-version: 22
 
+      - name: Cache CLI downloads
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: seolity-npm-${{ inputs.engines }}-v1
+
       - name: Install official CLI
         run: |
-          case ",${{ inputs.engines }}," in *",claude,"*) npm install -g @anthropic-ai/claude-code && claude --version ;; esac
-          case ",${{ inputs.engines }}," in *",codex,"*) npm install -g @openai/codex && codex --version ;; esac
+          case ",${{ inputs.engines }}," in *",claude,"*) npm install -g --no-audit --no-fund @anthropic-ai/claude-code && claude --version ;; esac
+          case ",${{ inputs.engines }}," in *",codex,"*) npm install -g --no-audit --no-fund @openai/codex && codex --version ;; esac
 
       - name: Run SEOlity AI requests with your subscription
         run: node seolity-runner/runner.mjs
@@ -47,6 +58,7 @@ jobs:
           SEOLITY_ENGINES: ${{ inputs.engines }}
           SEOLITY_JOBS_BRANCH: ${{ inputs.branch }}
           SEOLITY_IDLE_SEC: ${{ inputs.idle }}
+          SEOLITY_POLL_SEC: ${{ inputs.poll }}
           SEOLITY_SHARED_SECRET: ${{ secrets.SEOLITY_SHARED_SECRET }}
           SEOLITY_CALLBACK_URL: ${{ secrets.SEOLITY_CALLBACK_URL }}
           SEOLITY_RELAY_URL: ${{ secrets.SEOLITY_RELAY_URL }}
