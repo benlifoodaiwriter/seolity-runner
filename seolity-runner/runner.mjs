@@ -149,6 +149,9 @@ async function askClaude(job) {
   await writeFile(sysFile, job.system || 'You are a helpful assistant.', 'utf8');
   const args = ['-p', '--output-format', 'json', '--model', job.model || 'sonnet', '--tools', '', '--max-turns', '2', '--no-session-persistence', '--system-prompt-file', sysFile];
   const env = { ...E, DISABLE_AUTOUPDATER: '1' };
+  // Reasoning effort chosen in SEOlity → Claude Code's extended-thinking budget.
+  const THINK = { low: 4000, medium: 10000, high: 20000, max: 31999 };
+  if (THINK[job.effort]) env.MAX_THINKING_TOKENS = String(THINK[job.effort]);
   delete env.ANTHROPIC_API_KEY; // never bill the API – use the subscription token
   delete env.ANTHROPIC_AUTH_TOKEN;
   delete env.SEOLITY_SHARED_SECRET;
@@ -177,6 +180,7 @@ async function askCodex(job) {
   const input = (job.system ? `# Instructions\n${job.system}\n\n# Task\n` : '') + job.prompt + '\n\nReturn only the requested output. Do not run commands or edit files.';
   const args = ['exec', '--skip-git-repo-check', '--sandbox', 'read-only', '--ephemeral', '--json', '-o', outFile];
   if (job.model) args.push('-m', job.model);
+  if (['minimal', 'low', 'medium', 'high'].includes(job.effort)) args.push('-c', `model_reasoning_effort="${job.effort}"`);
   args.push('-');
   const env = { ...E, CODEX_HOME: codexHome };
   delete env.OPENAI_API_KEY; // never bill the API – use the ChatGPT plan
